@@ -4,6 +4,7 @@
 #include <vector>
 #include <set>
 #include <map>
+#include <unordered_map>
 #include <stack>
 #include <unordered_set>
 #include <algorithm>
@@ -12,6 +13,41 @@
 #include <Eigen/Sparse>
 #include <Eigen/IterativeLinearSolvers>
 #include <iomanip> // std::setprecision
+#include <ctime>
+
+class Timer {
+private:
+	clock_t start_time;
+	std::string label;
+
+public:
+	static void start_t(const std::string& _label = "") {
+		Timer& timer = get_instance();
+		timer.start_time = clock();
+		timer.label = _label;
+	}
+
+	static void end_t() {
+		Timer& timer = get_instance();
+		clock_t end_time = clock();
+		double elapsed = double(end_time - timer.start_time) / CLOCKS_PER_SEC;
+
+		std::cout << "执行时间";
+		if (!timer.label.empty()) {
+			std::cout << " (" << timer.label << ")";
+		}
+		std::cout << ": " << elapsed << " 秒" << std::endl;
+	}
+
+private:
+	Timer() {}
+	static Timer& get_instance() {
+		static Timer instance;
+		return instance;
+	}
+};
+#define START_T(label) Timer::start_t(label)
+#define END_T() Timer::end_t()
 
 int D = 0;
 double* solution;
@@ -565,24 +601,17 @@ int* nodes_num;
 std::vector<node*> nodes_d[10]; // 八叉树每层的节点数组
 int size_d[10]; // 八叉树每层的节点数量
 int tot_size; // 八叉树总节点数
+x_bits** offset; // 八叉树节点的x_bits, y_bits, z_bits
+node* root; // 树根
 
 // 假设D < 10
 function* key_to_Fo[10];
 double* table1[10][10];
 double* table2[10][10];
 double* table3[10][10];
+double* table4[10];
 
-void make_inner_product_table(int D, double width) {
-	// Fo(p)=Fo(x)Fo(y)Fo(z)
-	// <Fo'(p), Fo(p)>=<Fo'(x), Fo(x)>*<Fo'(y), Fo(y)>*<Fo'(z), Fo(z)>
-	// <△Fo'(p), Fo(p)>=<d2[Fo'(x)]/d2x, Fo(x)>*<Fo'(y), Fo(y)>*<Fo'(z), Fo(z)>+...轮换对称求和...
-	// <▽Fo'(p), Fo(p)>的x分量=<d[Fo'(x)]/dx, Fo(x)>*<Fo'(y), Fo(y)>*<Fo'(z), Fo(z)>，y分量与z分量类似
-	// 因此只需制作<Fo'(x), Fo(x)>、<d[Fo'(x)]/dx, Fo(x)>、<d2[Fo'(x)]/d2x, Fo(x)>三张内积表，分别对应table1,table2,table3
-	// 如果只是为了知道Fo(x)，我们其实不需要节点完整编号，只要知道center_x与width
-	// 我们只要知道x每次的走向，就能算出center_x
-	// 我们只要知道x所在节点的深度，就能算出width
-	// 论文2中说只要用Shuffled xyz Key的x-bits来查询，但是我觉得这样好像缺失了深度信息，因为查询索引是整数而不是字符串，我们不知道前导零或后导零是x-bit还是填充
-	// 所以我把深度纳入表的索引中
+void set_functions(double width) {
 	for (int d = 0;d <= D;d++) {
 		void* p = operator new[]((1 << d) * sizeof(function));
 		key_to_Fo[d] = static_cast<function*>(p);
@@ -596,6 +625,19 @@ void make_inner_product_table(int D, double width) {
 			key_to_Fo[d][key] = std::move(get_Fo(x, width / (1 << d)));
 		}
 	}
+}
+
+void set_inner_product_table(double width) {
+	// Fo(p)=Fo(x)Fo(y)Fo(z)
+	// <Fo'(p), Fo(p)>=<Fo'(x), Fo(x)>*<Fo'(y), Fo(y)>*<Fo'(z), Fo(z)>
+	// <△Fo'(p), Fo(p)>=<d2[Fo'(x)]/d2x, Fo(x)>*<Fo'(y), Fo(y)>*<Fo'(z), Fo(z)>+...轮换对称求和...
+	// <▽Fo'(p), Fo(p)>的x分量=<d[Fo'(x)]/dx, Fo(x)>*<Fo'(y), Fo(y)>*<Fo'(z), Fo(z)>，y分量与z分量类似
+	// 因此只需制作<Fo'(x), Fo(x)>、<d[Fo'(x)]/dx, Fo(x)>、<d2[Fo'(x)]/d2x, Fo(x)>三张内积表，分别对应table1,table2,table3
+	// 如果只是为了知道Fo(x)，我们其实不需要节点完整编号，只要知道center_x与width
+	// 我们只要知道x每次的走向，就能算出center_x
+	// 我们只要知道x所在节点的深度，就能算出width
+	// 论文2中说只要用Shuffled xyz Key的x-bits来查询，但是我觉得这样好像缺失了深度信息，因为查询索引是整数而不是字符串，我们不知道前导零或后导零是x-bit还是填充
+	// 所以我把深度纳入表的索引中
 	for (int d1 = 0;d1 <= D;d1++) {
 		for (int d2 = 0;d2 <= D;d2++) {
 			int len1 = (1 << d1), len2 = (1 << d2);
@@ -617,15 +659,32 @@ void make_inner_product_table(int D, double width) {
 	}
 }
 
+void set_value_table() {
+	// 对每个节点函数，建表保存它在最细节点的中心以及立方体顶点处的值
+	// 因此需要的步长是最细宽度的一半
+	int num = (1 << (D + 1)) + 1;
+	double width = 1.0 / (1 << (D + 1));
+	for (int d = 0;d <= D;d++) {
+		int len = (1 << d);
+		table4[d] = new double[len * num]();
+		for (unsigned int key = 0;key < len;key++) {
+			function& Fo = key_to_Fo[d][key];
+			for (int j = 0;j < num;j++) {
+				table4[d][key * num + j] = Fo(j * width - 0.5);
+			}
+		}
+	}
+}
+
 int pre_size[10];
 
 struct divergence :public operation {
 	void operator()(node* a, node* b) override {
 		if (b->depth != D) return;
 		normal u;
-		u.x = table2[b->depth][a->depth][b->key.extract(0).value * (1 << a->depth) + a->key.extract(0).value] * table1[b->depth][a->depth][b->key.extract(1).value * (1 << a->depth) + a->key.extract(1).value] * table1[b->depth][a->depth][b->key.extract(2).value * (1 << a->depth) + a->key.extract(2).value];
-		u.y = table2[b->depth][a->depth][b->key.extract(1).value * (1 << a->depth) + a->key.extract(1).value] * table1[b->depth][a->depth][b->key.extract(0).value * (1 << a->depth) + a->key.extract(0).value] * table1[b->depth][a->depth][b->key.extract(2).value * (1 << a->depth) + a->key.extract(2).value];
-		u.z = table2[b->depth][a->depth][b->key.extract(2).value * (1 << a->depth) + a->key.extract(2).value] * table1[b->depth][a->depth][b->key.extract(0).value * (1 << a->depth) + a->key.extract(0).value] * table1[b->depth][a->depth][b->key.extract(1).value * (1 << a->depth) + a->key.extract(1).value];
+		u.x = table2[b->depth][a->depth][offset[b->idx_node][0].value * (1 << a->depth) + offset[a->idx_node][0].value] * table1[b->depth][a->depth][offset[b->idx_node][1].value * (1 << a->depth) + offset[a->idx_node][1].value] * table1[b->depth][a->depth][offset[b->idx_node][2].value * (1 << a->depth) + offset[a->idx_node][2].value];
+		u.y = table2[b->depth][a->depth][offset[b->idx_node][1].value * (1 << a->depth) + offset[a->idx_node][1].value] * table1[b->depth][a->depth][offset[b->idx_node][0].value * (1 << a->depth) + offset[a->idx_node][0].value] * table1[b->depth][a->depth][offset[b->idx_node][2].value * (1 << a->depth) + offset[a->idx_node][2].value];
+		u.z = table2[b->depth][a->depth][offset[b->idx_node][2].value * (1 << a->depth) + offset[a->idx_node][2].value] * table1[b->depth][a->depth][offset[b->idx_node][0].value * (1 << a->depth) + offset[a->idx_node][0].value] * table1[b->depth][a->depth][offset[b->idx_node][1].value * (1 << a->depth) + offset[a->idx_node][1].value];
 		u *= -1;
 		a->b += b->v * u;
 	}
@@ -639,9 +698,9 @@ struct laplacian :public operation {
 		int idx1 = a->idx_node - pre_size[a->depth];
 		int idx2 = b->idx_node - pre_size[b->depth];
 		double value = 0;
-		value += table3[a->depth][b->depth][a->key.extract(0).value * (1 << b->depth) + b->key.extract(0).value] * table1[a->depth][b->depth][a->key.extract(1).value * (1 << b->depth) + b->key.extract(1).value] * table1[a->depth][b->depth][a->key.extract(2).value * (1 << b->depth) + b->key.extract(2).value];
-		value += table3[a->depth][b->depth][a->key.extract(1).value * (1 << b->depth) + b->key.extract(1).value] * table1[a->depth][b->depth][a->key.extract(0).value * (1 << b->depth) + b->key.extract(0).value] * table1[a->depth][b->depth][a->key.extract(2).value * (1 << b->depth) + b->key.extract(2).value];
-		value += table3[a->depth][b->depth][a->key.extract(2).value * (1 << b->depth) + b->key.extract(2).value] * table1[a->depth][b->depth][a->key.extract(1).value * (1 << b->depth) + b->key.extract(1).value] * table1[a->depth][b->depth][a->key.extract(0).value * (1 << b->depth) + b->key.extract(0).value];
+		value += table3[a->depth][b->depth][offset[a->idx_node][0].value * (1 << b->depth) + offset[b->idx_node][0].value] * table1[a->depth][b->depth][offset[a->idx_node][1].value * (1 << b->depth) + offset[b->idx_node][1].value] * table1[a->depth][b->depth][offset[a->idx_node][2].value * (1 << b->depth) + offset[b->idx_node][2].value];
+		value += table3[a->depth][b->depth][offset[a->idx_node][1].value * (1 << b->depth) + offset[b->idx_node][1].value] * table1[a->depth][b->depth][offset[a->idx_node][0].value * (1 << b->depth) + offset[b->idx_node][0].value] * table1[a->depth][b->depth][offset[a->idx_node][2].value * (1 << b->depth) + offset[b->idx_node][2].value];
+		value += table3[a->depth][b->depth][offset[a->idx_node][2].value * (1 << b->depth) + offset[b->idx_node][2].value] * table1[a->depth][b->depth][offset[a->idx_node][1].value * (1 << b->depth) + offset[b->idx_node][1].value] * table1[a->depth][b->depth][offset[a->idx_node][0].value * (1 << b->depth) + offset[b->idx_node][0].value];
 		value = -value;
 		if (value != 0) {
 			tripletList->emplace_back(idx1, idx2, value);
@@ -668,9 +727,9 @@ Eigen::SparseMatrix<double> construct_laplacian_matrix(int d, int d2) {
 				node& o2 = *pa->neighbors[j];
 				int idx2 = o2.idx_node - pre_size[d2];
 				double value = 0;
-				value += table3[d][d2][o.key.extract(0).value * (1 << d2) + o2.key.extract(0).value] * table1[d][d2][o.key.extract(1).value * (1 << d2) + o2.key.extract(1).value] * table1[d][d2][o.key.extract(2).value * (1 << d2) + o2.key.extract(2).value];
-				value += table3[d][d2][o.key.extract(1).value * (1 << d2) + o2.key.extract(1).value] * table1[d][d2][o.key.extract(0).value * (1 << d2) + o2.key.extract(0).value] * table1[d][d2][o.key.extract(2).value * (1 << d2) + o2.key.extract(2).value];
-				value += table3[d][d2][o.key.extract(2).value * (1 << d2) + o2.key.extract(2).value] * table1[d][d2][o.key.extract(1).value * (1 << d2) + o2.key.extract(1).value] * table1[d][d2][o.key.extract(0).value * (1 << d2) + o2.key.extract(0).value];
+				value += table3[d][d2][offset[o.idx_node][0].value * (1 << d2) + offset[o2.idx_node][0].value] * table1[d][d2][offset[o.idx_node][1].value * (1 << d2) + offset[o2.idx_node][1].value] * table1[d][d2][offset[o.idx_node][2].value * (1 << d2) + offset[o2.idx_node][2].value];
+				value += table3[d][d2][offset[o.idx_node][1].value * (1 << d2) + offset[o2.idx_node][1].value] * table1[d][d2][offset[o.idx_node][0].value * (1 << d2) + offset[o2.idx_node][0].value] * table1[d][d2][offset[o.idx_node][2].value * (1 << d2) + offset[o2.idx_node][2].value];
+				value += table3[d][d2][offset[o.idx_node][2].value * (1 << d2) + offset[o2.idx_node][2].value] * table1[d][d2][offset[o.idx_node][1].value * (1 << d2) + offset[o2.idx_node][1].value] * table1[d][d2][offset[o.idx_node][0].value * (1 << d2) + offset[o2.idx_node][0].value];
 				value = -value;
 				if (value != 0) {
 					tripletList.emplace_back(idx, idx2, value);
@@ -682,9 +741,9 @@ Eigen::SparseMatrix<double> construct_laplacian_matrix(int d, int d2) {
 			node& o2 = *nodes_d[d2][i2];
 			int idx2 = o2.idx_node - pre_size[d2];
 			double value = 0;
-			value += table3[d][d2][o.key.extract(0).value * (1 << d2) + o2.key.extract(0).value] * table1[d][d2][o.key.extract(1).value * (1 << d2) + o2.key.extract(1).value] * table1[d][d2][o.key.extract(2).value * (1 << d2) + o2.key.extract(2).value];
-			value += table3[d][d2][o.key.extract(1).value * (1 << d2) + o2.key.extract(1).value] * table1[d][d2][o.key.extract(0).value * (1 << d2) + o2.key.extract(0).value] * table1[d][d2][o.key.extract(2).value * (1 << d2) + o2.key.extract(2).value];
-			value += table3[d][d2][o.key.extract(2).value * (1 << d2) + o2.key.extract(2).value] * table1[d][d2][o.key.extract(1).value * (1 << d2) + o2.key.extract(1).value] * table1[d][d2][o.key.extract(0).value * (1 << d2) + o2.key.extract(0).value];
+			value += table3[d][d2][offset[o.idx_node][0].value * (1 << d2) + offset[o2.idx_node][0].value] * table1[d][d2][offset[o.idx_node][1].value * (1 << d2) + offset[o2.idx_node][1].value] * table1[d][d2][offset[o.idx_node][2].value * (1 << d2) + offset[o2.idx_node][2].value];
+			value += table3[d][d2][offset[o.idx_node][1].value * (1 << d2) + offset[o2.idx_node][1].value] * table1[d][d2][offset[o.idx_node][0].value * (1 << d2) + offset[o2.idx_node][0].value] * table1[d][d2][offset[o.idx_node][2].value * (1 << d2) + offset[o2.idx_node][2].value];
+			value += table3[d][d2][offset[o.idx_node][2].value * (1 << d2) + offset[o2.idx_node][2].value] * table1[d][d2][offset[o.idx_node][1].value * (1 << d2) + offset[o2.idx_node][1].value] * table1[d][d2][offset[o.idx_node][0].value * (1 << d2) + offset[o2.idx_node][0].value];
 			value = -value;
 			if (value != 0) {
 				tripletList.emplace_back(idx, idx2, value);
@@ -1002,6 +1061,31 @@ int marching_cube_table[256][15] = {
 	{0, 3, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
 	{-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1}
 };
+double evaluate_node_center(node* cur, node* o) {
+	static int num = (1 << (D + 1)) + 1;
+	point& p = o->center;
+	unsigned int index_x = (offset[o->idx_node][0].value << 1) + 1;
+	unsigned int index_y = (offset[o->idx_node][1].value << 1) + 1;
+	unsigned int index_z = (offset[o->idx_node][2].value << 1) + 1;
+	std::stack<node*> s;
+	s.push(cur);
+	double value = 0;
+	while (!s.empty()) {
+		cur = s.top();
+		s.pop();
+		double weight = table4[cur->depth][offset[cur->idx_node][0].value * num + index_x] * table4[cur->depth][offset[cur->idx_node][1].value * num + index_y] * table4[cur->depth][offset[cur->idx_node][2].value * num + index_z];
+		value += weight * solution[cur->idx_node];
+		if (cur->has_children) {
+			for (int i = 0;i < 8;i++) {
+				node& o = *cur->children[i];
+				if (o.idx_node != -1 && fabs(p.x - o.center.x) < 1.5 * o.width && fabs(p.y - o.center.y) < 1.5 * o.width && fabs(p.z - o.center.z) < 1.5 * o.width) {
+					s.push(&o);
+				}
+			}
+		}
+	}
+	return value;
+}
 double evaluate_point(node* cur, point p) {
 	if (value_at_point.find(p) != value_at_point.end()) {
 		return value_at_point[p];
@@ -1026,24 +1110,50 @@ double evaluate_point(node* cur, point p) {
 	value_at_point[p] = value;
 	return value;
 }
-std::map<point, int, point_comparator> edge_root_number[3][10], face_root_number[3][10];
+double evaluate_point(node* cur, point p, unsigned int index_x, unsigned int index_y, unsigned int index_z) {
+	static int num = (1 << (D + 1)) + 1;
+	if (value_at_point.find(p) != value_at_point.end()) {
+		return value_at_point[p];
+	}
+	std::stack<node*> s;
+	s.push(cur);
+	double value = 0;
+	while (!s.empty()) {
+		cur = s.top();
+		s.pop();
+		double weight = table4[cur->depth][offset[cur->idx_node][0].value * num + index_x] * table4[cur->depth][offset[cur->idx_node][1].value * num + index_y] * table4[cur->depth][offset[cur->idx_node][2].value * num + index_z];
+		value += weight * solution[cur->idx_node];
+		if (cur->has_children) {
+			for (int i = 0;i < 8;i++) {
+				node& o = *cur->children[i];
+				if (o.idx_node != -1 && fabs(p.x - o.center.x) < 1.5 * o.width && fabs(p.y - o.center.y) < 1.5 * o.width && fabs(p.z - o.center.z) < 1.5 * o.width) {
+					s.push(&o);
+				}
+			}
+		}
+	}
+	value_at_point[p] = value;
+	return value;
+}
 double iso_value = 0;
 std::set<point, point_comparator> vis;
-void extend_finest_nodes() {
+void subdivide() {
 	int edges[12][2] = { {0,1},{1,2},{2,3},{3,0},{4,5},{5,6},{6,7},{7,4},{0,4},{1,5},{2,6},{3,7} };
-	node* root = nodes_d[0][0];
-	double width = nodes_d[D][0]->width;
+	double width = 1.0 / (1 << D);
 	std::stack<point> s;
 	for (int i = 0;i < size_d[D];i++) {
 		node& o = *nodes_d[D][i];
 		s.push(o.center);
+		vis.insert(o.center);
 	}
 	point node_center, new_node_center;
+	unsigned int index_x, index_y, index_z;
+	double v1, v2;
+	int idx1, idx2;
+	point center;
 	while (!s.empty()) {
 		node_center = s.top();
 		s.pop();
-		if (vis.find(node_center) == vis.end()) vis.insert(node_center);
-		else continue;
 		point p[8];
 		// 注意MC算法中顶点编号与八叉树算法中顶点编号不同，这里的编号参考https://github.com/Goodhao/marching-cube/blob/main/encode.png
 		p[0] = node_center + point{-width / 2, -width / 2, +width / 2};
@@ -1054,338 +1164,91 @@ void extend_finest_nodes() {
 		p[5] = node_center + point{+width / 2, +width / 2, +width / 2};
 		p[6] = node_center + point{+width / 2, +width / 2, -width / 2};
 		p[7] = node_center + point{+width / 2, -width / 2, -width / 2};
+		bool has_root = false;
 		for (int e = 0;e < 12;e++) {
-			int idx1 = edges[e][0];
-			int idx2 = edges[e][1];
-			point center = (p[idx1] + p[idx2]) / 2;
+			idx1 = edges[e][0];
+			idx2 = edges[e][1];
+			center = (p[idx1] + p[idx2]) / 2;
 			int dir = 0;
 			if (e == 8 || e == 9 || e == 10 || e == 11) dir = 0; // x轴方向
 			if (e == 0 || e == 2 || e == 4 || e == 6) dir = 1; // y轴方向
 			if (e == 1 || e == 3 || e == 5 || e == 7) dir = 2; // z轴方向
-			if (edge_root_number[dir][D].find(center) == edge_root_number[dir][D].end()) {
-				double v1 = evaluate_point(root, p[idx1]) - iso_value;
-				double v2 = evaluate_point(root, p[idx2]) - iso_value;
-				if (v1 < 0 && v2 > 0 || v1 > 0 && v2 < 0) {
-					edge_root_number[dir][D][center] = 1;
-				}
-			}
-		}
-		for (int e = 0;e < 12;e++) {
-			int idx1 = edges[e][0];
-			int idx2 = edges[e][1];
-			point center = (p[idx1] + p[idx2]) / 2;
-			int dir = 0;
-			if (e == 8 || e == 9 || e == 10 || e == 11) dir = 0; // x轴方向
-			if (e == 0 || e == 2 || e == 4 || e == 6) dir = 1; // y轴方向
-			if (e == 1 || e == 3 || e == 5 || e == 7) dir = 2; // z轴方向
-			if (edge_root_number[dir][D].find(center) != edge_root_number[dir][D].end()) {
+			index_x = round((p[idx1].x + 0.5) * (1 << (D + 1)));
+			index_y = round((p[idx1].y + 0.5) * (1 << (D + 1)));
+			index_z = round((p[idx1].z + 0.5) * (1 << (D + 1)));
+			v1 = evaluate_point(root, p[idx1], index_x, index_y, index_z) - iso_value;
+			index_x = round((p[idx2].x + 0.5) * (1 << (D + 1)));
+			index_y = round((p[idx2].y + 0.5) * (1 << (D + 1)));
+			index_z = round((p[idx2].z + 0.5) * (1 << (D + 1)));
+			v2 = evaluate_point(root, p[idx2], index_x, index_y, index_z) - iso_value;
+			if (v1 < 0 && v2 > 0 || v1 > 0 && v2 < 0) {
+				has_root = true;
 				// 枚举边的3个虚拟邻居
 				new_node_center = 2 * (center - node_center) + node_center;
 				if (vis.find(new_node_center) == vis.end()) {
-					s.push(new_node_center);
+					s.push(new_node_center); vis.insert(new_node_center);
 				}
 				if (dir == 0) {
 					new_node_center = { node_center.x, node_center.y, 2 * (center.z - node_center.z) + node_center.z };
 					if (vis.find(new_node_center) == vis.end()) {
-						s.push(new_node_center);
+						s.push(new_node_center); vis.insert(new_node_center);
 					}
 					new_node_center = { node_center.x, 2 * (center.y - node_center.y) + node_center.y, node_center.z };
 					if (vis.find(new_node_center) == vis.end()) {
-						s.push(new_node_center);
+						s.push(new_node_center); vis.insert(new_node_center);
 					}
 				}
 				else if (dir == 1) {
 					new_node_center = { node_center.x, node_center.y, 2 * (center.z - node_center.z) + node_center.z };
 					if (vis.find(new_node_center) == vis.end()) {
-						s.push(new_node_center);
+						s.push(new_node_center); vis.insert(new_node_center);
 					}
 					new_node_center = { 2 * (center.x - node_center.x) + node_center.x, node_center.y, node_center.z };
 					if (vis.find(new_node_center) == vis.end()) {
-						s.push(new_node_center);
+						s.push(new_node_center); vis.insert(new_node_center);
 					}
 				}
 				else if (dir == 2) {
 					new_node_center = { node_center.x, 2 * (center.y - node_center.y) + node_center.y, node_center.z };
 					if (vis.find(new_node_center) == vis.end()) {
-						s.push(new_node_center);
+						s.push(new_node_center); vis.insert(new_node_center);
 					}
 					new_node_center = { 2 * (center.x - node_center.x) + node_center.x, node_center.y, node_center.z };
 					if (vis.find(new_node_center) == vis.end()) {
-						s.push(new_node_center);
+						s.push(new_node_center); vis.insert(new_node_center);
 					}
 				}
 			}
 		}
-	}
-}
-int edge_root_count(int dir, int depth, point center) {
-	// {边方向、深度、边的中点}（在所有合法的边中）唯一确定一条边
-	auto it = edge_root_number[dir][depth].find(center);
-	if (it != edge_root_number[dir][depth].end()) {
-		return it->second;
-	}
-	else if (depth == D) {
-		return 0;
-	}
-	else {
-		double width = 1.0 / (1 << depth);
-		int cnt = 0;
-		point new_center = center;
-		if (dir == 0) {
-			new_center.x = center.x + width / 4;
-			cnt += edge_root_count(dir, depth + 1, new_center);
-			new_center.x = center.x - width / 4;
-			cnt += edge_root_count(dir, depth + 1, new_center);
-		}
-		else if (dir == 1) {
-			new_center.y = center.y + width / 4;
-			cnt += edge_root_count(dir, depth + 1, new_center);
-			new_center.y = center.y - width / 4;
-			cnt += edge_root_count(dir, depth + 1, new_center);
-		}
-		else if (dir == 2) {
-			new_center.z = center.z + width / 4;
-			cnt += edge_root_count(dir, depth + 1, new_center);
-			new_center.z = center.z - width / 4;
-			cnt += edge_root_count(dir, depth + 1, new_center);
-		}
-		return edge_root_number[dir][depth][center] = cnt;
-	}
-}
-void compute_edge_root_number() {
-	int edges[12][2] = { {0,1},{1,2},{2,3},{3,0},{4,5},{5,6},{6,7},{7,4},{0,4},{1,5},{2,6},{3,7} };
-	node* root = nodes_d[0][0];
-	for (int d = D - 1;d >= 0;d--) {
-		for (int i = 0;i < size_d[d];i++) {
-			node& o = *nodes_d[d][i];
-			double width = o.width;
-			point p[8];
-			// 注意MC算法中顶点编号与八叉树算法中顶点编号不同，这里的编号参考https://github.com/Goodhao/marching-cube/blob/main/encode.png
-			p[0] = o.center + point{-width / 2, -width / 2, +width / 2};
-			p[1] = o.center + point{-width / 2, +width / 2, +width / 2};
-			p[2] = o.center + point{-width / 2, +width / 2, -width / 2};
-			p[3] = o.center + point{-width / 2, -width / 2, -width / 2};
-			p[4] = o.center + point{+width / 2, -width / 2, +width / 2};
-			p[5] = o.center + point{+width / 2, +width / 2, +width / 2};
-			p[6] = o.center + point{+width / 2, +width / 2, -width / 2};
-			p[7] = o.center + point{+width / 2, -width / 2, -width / 2};
-			for (int e = 0;e < 12;e++) {
-				int idx1 = edges[e][0];
-				int idx2 = edges[e][1];
-				point center = (p[idx1] + p[idx2]) / 2;
-				int dir = 0;
-				if (e == 8 || e == 9 || e == 10 || e == 11) dir = 0; // x轴方向
-				if (e == 0 || e == 2 || e == 4 || e == 6) dir = 1; // y轴方向
-				if (e == 1 || e == 3 || e == 5 || e == 7) dir = 2; // z轴方向
-				edge_root_count(dir, d, center);
-			}
-		}
-	}
-}
-int face_root_count(int dir, int depth, point center) {
-	// {法线方向、深度、面的中心点}（在所有合法的面中）唯一确定一个面
-	// 计算面内部的交点个数，不包括边上的交点个数
-	auto it = face_root_number[dir][depth].find(center);
-	if (it != face_root_number[dir][depth].end()) {
-		return it->second;
-	}
-	else if (depth == D) {
-		return 0;
-	}
-	else {
-		double width = 1.0 / (1 << depth);
-		int cnt = 0;
-		if (dir == 0) {
-			point c;
-			c = { center.x, center.y + width / 4, center.z + width / 4 };
-			cnt += face_root_count(dir, depth + 1, c);
-			c = { center.x, center.y + width / 4, center.z - width / 4 };
-			cnt += face_root_count(dir, depth + 1, c);
-			c = { center.x, center.y - width / 4, center.z + width / 4 };
-			cnt += face_root_count(dir, depth + 1, c);
-			c = { center.x, center.y - width / 4, center.z - width / 4 };
-			cnt += face_root_count(dir, depth + 1, c);
-
-			c = { center.x, center.y - width / 4, center.z };
-			cnt += edge_root_count(dir, depth + 1, c);
-			c = { center.x, center.y + width / 4, center.z };
-			cnt += edge_root_count(dir, depth + 1, c);
-			c = { center.x, center.y, center.z - width / 4 };
-			cnt += edge_root_count(dir, depth + 1, c);
-			c = { center.x, center.y, center.z + width / 4 };
-			cnt += edge_root_count(dir, depth + 1, c);
-		}
-		else if (dir == 1) {
-			point c;
-			c = { center.x + width / 4, center.y, center.z + width / 4 };
-			cnt += face_root_count(dir, depth + 1, c);
-			c = { center.x + width / 4, center.y, center.z - width / 4 };
-			cnt += face_root_count(dir, depth + 1, c);
-			c = { center.x - width / 4, center.y, center.z + width / 4 };
-			cnt += face_root_count(dir, depth + 1, c);
-			c = { center.x - width / 4, center.y, center.z - width / 4 };
-			cnt += face_root_count(dir, depth + 1, c);
-
-			c = { center.x - width / 4, center.y, center.z };
-			cnt += edge_root_count(dir, depth + 1, c);
-			c = { center.x + width / 4, center.y, center.z };
-			cnt += edge_root_count(dir, depth + 1, c);
-			c = { center.x, center.y, center.z - width / 4 };
-			cnt += edge_root_count(dir, depth + 1, c);
-			c = { center.x, center.y, center.z + width / 4 };
-			cnt += edge_root_count(dir, depth + 1, c);
-		}
-		else if (dir == 2) {
-			point c;
-			c = { center.x + width / 4, center.y + width / 4, center.z };
-			cnt += face_root_count(dir, depth + 1, c);
-			c = { center.x + width / 4, center.y - width / 4, center.z };
-			cnt += face_root_count(dir, depth + 1, c);
-			c = { center.x - width / 4, center.y + width / 4, center.z };
-			cnt += face_root_count(dir, depth + 1, c);
-			c = { center.x - width / 4, center.y - width / 4, center.z };
-			cnt += face_root_count(dir, depth + 1, c);
-
-			c = { center.x, center.y - width / 4, center.z };
-			cnt += edge_root_count(dir, depth + 1, c);
-			c = { center.x, center.y + width / 4, center.z };
-			cnt += edge_root_count(dir, depth + 1, c);
-			c = { center.x - width / 4, center.y, center.z };
-			cnt += edge_root_count(dir, depth + 1, c);
-			c = { center.x + width / 4, center.y, center.z };
-			cnt += edge_root_count(dir, depth + 1, c);
-		}
-		return face_root_number[dir][depth][center] = cnt;
-	}
-}
-void compute_face_root_number() {
-	int edges[12][2] = { {0,1},{1,2},{2,3},{3,0},{4,5},{5,6},{6,7},{7,4},{0,4},{1,5},{2,6},{3,7} };
-	int faces[6][4] = { {3,0,1,2},{5,4,7,6},{7,8,3,11},{1,9,5,10},{2,11,6,10},{4,9,0,8} };
-	node* root = nodes_d[0][0];
-	for (int d = D - 1;d >= 0;d--) {
-		for (int i = 0;i < size_d[d];i++) {
-			node& o = *nodes_d[d][i];
-			double width = o.width;
-			point p[8];
-			// 注意MC算法中顶点编号与八叉树算法中顶点编号不同，这里的编号参考https://github.com/Goodhao/marching-cube/blob/main/encode.png
-			p[0] = o.center + point{-width / 2, -width / 2, +width / 2};
-			p[1] = o.center + point{-width / 2, +width / 2, +width / 2};
-			p[2] = o.center + point{-width / 2, +width / 2, -width / 2};
-			p[3] = o.center + point{-width / 2, -width / 2, -width / 2};
-			p[4] = o.center + point{+width / 2, -width / 2, +width / 2};
-			p[5] = o.center + point{+width / 2, +width / 2, +width / 2};
-			p[6] = o.center + point{+width / 2, +width / 2, -width / 2};
-			p[7] = o.center + point{+width / 2, -width / 2, -width / 2};
-			for (int f = 0;f < 6;f++) {
-				point center;
-				for (int j = 0;j < 4;j++) {
-					center = center + p[edges[faces[f][j]][0]] + p[edges[faces[f][j]][1]];
+		if (has_root) {
+			node* cur = root;
+			while (cur->depth < D) {
+				if (!cur->has_children) {
+					cur->init_children();
+					if (cur->depth == D - 1) {
+						for (int j = 0;j < 8;j++) {
+							node& o2 = *cur->children[j];
+							size_d[D]++;
+							nodes_d[D].push_back(&o2);
+						}
+					}
 				}
-				center = center / 8;
-				int dir = 0;
-				if (f == 0 || f == 1) dir = 0; // x轴法向
-				if (f == 2 || f == 3) dir = 1; // y轴法向
-				if (f == 4 || f == 5) dir = 2; // z轴法向
-				face_root_count(dir, d, center);
+				int child_idx = 0;
+				if (node_center.x > cur->center.x) {
+					child_idx |= 4;
+				}
+				if (node_center.y > cur->center.y) {
+					child_idx |= 2;
+				}
+				if (node_center.z > cur->center.z) {
+					child_idx |= 1;
+				}
+				cur = cur->children[child_idx];
 			}
 		}
 	}
 }
 void marching_cube() {
-	node* root = nodes_d[0][0];
-
-	double sum = 0;
-	double val = 0;
-	for (int i = 0;i < size_d[D];i++) {
-		node& o = *nodes_d[D][i];
-		/*val += o.sampling_density * evaluate_point(root, o.center);
-		sum += o.sampling_density;*/
-		double w = sqrt(o.v * o.v);
-		val += w * evaluate_point(root, o.center);
-		sum += w;
-	}
-	iso_value = val / sum;
-	/*for (int i = 0;i < n;i++) {
-		val += evaluate_point(root, a[i]);
-	}
-	iso_value = val / n;
-	value_at_point.clear();*/
-	std::cout << "等值面的值为：" << iso_value << std::endl;
-
-	extend_finest_nodes();
-	std::cout << "最细分辨率立方体上的交点扩展完毕" << std::endl;
-
-	/*std::ofstream file2;
-	file2.open("V.txt");
-	for (auto p : vis) {
-		file2 << p.x << " " << p.y << " " << p.z << " " << 0 << " " << 0 << " " << 0 << std::endl;
-	}
-	file2.close();*/
-
-	compute_edge_root_number();
-	compute_face_root_number();
-	std::cout << "等值面交点预处理完毕" << std::endl;
-	int edges[12][2] = { {0,1},{1,2},{2,3},{3,0},{4,5},{5,6},{6,7},{7,4},{0,4},{1,5},{2,6},{3,7} };
-	int faces[6][4] = { {3,0,1,2},{5,4,7,6},{7,8,3,11},{1,9,5,10},{2,11,6,10},{4,9,0,8} };
-	for (int d = 0;d < D;d++) { // 跳过d=D，因为最多细分到D
-		for (int i = 0;i < size_d[d];i++) {
-			node& o = *nodes_d[d][i];
-			if (o.has_children) continue; // 跳过非叶节点
-			double width = o.width;
-			point p[8];
-			p[0] = o.center + point{-width / 2, -width / 2, +width / 2};
-			p[1] = o.center + point{-width / 2, +width / 2, +width / 2};
-			p[2] = o.center + point{-width / 2, +width / 2, -width / 2};
-			p[3] = o.center + point{-width / 2, -width / 2, -width / 2};
-			p[4] = o.center + point{+width / 2, -width / 2, +width / 2};
-			p[5] = o.center + point{+width / 2, +width / 2, +width / 2};
-			p[6] = o.center + point{+width / 2, +width / 2, -width / 2};
-			p[7] = o.center + point{+width / 2, -width / 2, -width / 2};
-			bool subdivide = false;
-			//if (o.idx_node == -1) subdivide = true;
-			if (!subdivide) for (int e = 0;e < 12;e++) {
-				int idx1 = edges[e][0];
-				int idx2 = edges[e][1];
-				point center = (p[idx1] + p[idx2]) / 2;
-				int dir = 0;
-				if (e == 8 || e == 9 || e == 10 || e == 11) dir = 0; // x轴方向
-				if (e == 0 || e == 2 || e == 4 || e == 6) dir = 1; // y轴方向
-				if (e == 1 || e == 3 || e == 5 || e == 7) dir = 2; // z轴方向
-				if (edge_root_count(dir, o.depth, center) > 0) { // 注意这里与论文1实现方式不同，论文1是边交点超过1个才细分，但是那样需要对不同分辨率都构造三角形，而我只对最细分辨率构造三角形，所以粗分辨率的边交点数即使=1也得细分
-					subdivide = true;
-					break;
-				}
-			}
-			if (!subdivide) for (int f = 0;f < 6;f++) {
-				int idx1 = faces[f][0];
-				int idx2 = faces[f][1];
-				int idx3 = faces[f][2];
-				int idx4 = faces[f][3];
-				point center;
-				for (int j = 0;j < 4;j++) {
-					center = center + p[edges[faces[f][j]][0]] + p[edges[faces[f][j]][1]];
-				}
-				center = center / 8;
-				int dir = 0;
-				if (f == 0 || f == 1) dir = 0; // x轴法向
-				if (f == 2 || f == 3) dir = 1; // y轴法向
-				if (f == 4 || f == 5) dir = 2; // z轴法向
-				if (face_root_count(dir, o.depth, center) > 0) {
-					subdivide = true;
-					break;
-				}
-			}
-			if (subdivide) {
-				o.init_children();
-				for (int j = 0;j < 8;j++) {
-					node& o2 = *o.children[j];
-					size_d[o2.depth]++;
-					nodes_d[o2.depth].push_back(&o2);
-				}
-			}
-		}
-	}
-
 	std::vector<triangle> triangles;
 	for (int d = D;d <= D;d++) {
 		for (int i = 0;i < size_d[d];i++) {
@@ -1401,7 +1264,6 @@ void marching_cube() {
 			p[5] = o.center + point{+width / 2, +width / 2, +width / 2};
 			p[6] = o.center + point{+width / 2, +width / 2, -width / 2};
 			p[7] = o.center + point{+width / 2, -width / 2, -width / 2};
-
 			int idx = 0;
 			for (int j = 7;j >= 0;j--) {
 				idx <<= 1;
@@ -1520,8 +1382,6 @@ int main() {
 	for (int i = 0;i < n;i++) {
 		double x, y, z, vx, vy, vz;
 		point_cloud >> x >> y >> z >> vx >> vy >> vz;
-		/*point_cloud >> x >> y >> z;
-		vx = vy = vz = 0;*/
 		a[i] = point{ x,y,z };
 		va[i] = normal{ vx,vy,vz };
 		min_x = std::min(min_x, x);
@@ -1556,6 +1416,8 @@ int main() {
 	width = 1;
 	center.x = center.y = center.z = 0; // 把中心放在(0,0,0)处
 
+
+	START_T("生成八叉树");
 	codes = new code[n]();
 	for (int i = 0;i < n;i++) {
 		codes[i].idx = i;
@@ -1690,6 +1552,7 @@ int main() {
 			}
 		}
 	}
+	root = nodes_d[0][0];
 	tot_size = 0;
 	for (int d = 0;d <= D;d++) {
 		for (int i = 0;i < size_d[d];i++) {
@@ -1716,7 +1579,17 @@ int main() {
 			}
 		}
 	}
-	std::cout << "第一步：八叉树生成完毕" << std::endl;
+	offset = new x_bits*[tot_size]();
+	for (int d = 0;d <= D;d++) {
+		for (int i = 0;i < size_d[d];i++) {
+			node& o = *nodes_d[d][i];
+			offset[o.idx_node] = new x_bits[3]();
+			for (int k = 0;k < 3;k++) {
+				offset[o.idx_node][k] = o.key.extract(k);
+			}
+		}
+	}
+	END_T();
 	std::cout << "节点个数：" << tot_size << std::endl;
 
 	std::ofstream file2;
@@ -1734,6 +1607,7 @@ int main() {
 	// -0.5<x<=0.5, F(x)=0.75-x^2
 	// 0.5<x<=1.5, F(x)=1.125-1.5x+0.5x^2
 	// 其他情况, F(x)=0
+	START_T("构造标准基函数");
 	F.polys[0].coeffs[0] = 1.125;
 	F.polys[0].coeffs[1] = 1.5;
 	F.polys[0].coeffs[2] = 0.5;
@@ -1747,6 +1621,7 @@ int main() {
 	F.break_points[1] = -0.5;
 	F.break_points[2] = 0.5;
 	F.break_points[3] = 1.5;
+	END_T();
 
 	// 直接把论文1的函数的定义域重新调整至[-1, 1]，而不是像论文2只把两个B卷积来得到[-1,1]的函数（这个函数并不二次可微，拉普拉斯矩阵没法算？不清楚论文2是如何处理这一点的）
 	// 但这样效果不好
@@ -1763,11 +1638,13 @@ int main() {
 	F.break_points[1] = -1.0/3.0;
 	F.break_points[2] = 1.0/3.0;
 	F.break_points[3] = 1;*/
-	std::cout << "第二步：标准基函数构造完毕" << std::endl;
 
+	
 	// 第三步：构造向量场V
+	// V的定义见论文1的Equation 2，这里要梳理一个逻辑，V的定义是一个和式，该和式是对积分式的近似，但是该和式本身也是需要分解到基函数上才能进行计算，所以我们用来计算的V其实是对光滑标量场的梯度场近似了两次
 	// vo = sum_{i} α(o,qi) normal_{qi}，论文1说是三线性插值，与它源码不一致，我们与它源码一样用基函数插值α(o,qi)=Fo(qi)
 	// 构造向量场的过程就是先用采样点法向量插值出八叉树节点向量，再用八叉树节点向量作为基函数系数构造出整个向量场（向量值函数）
+	START_T("构造向量场");
 	for (int d = 0;d <= D;d++) {
 		for (int i = 0;i < size_d[d];i++) {
 			node& o = *nodes_d[d][i];
@@ -1810,11 +1687,14 @@ int main() {
 			}
 		}
 	}
-	std::cout << "第三步：向量场生成完毕" << std::endl;
+	END_T();
 
+	
 	// 第四步：计算向量场的散度
 	// 需要注意的是这里按论文2的做法，相当于把基函数支撑集截断到[-1,1]，严格按[-1.5,1.5]来做需要枚举邻居的邻居或者从树根一路递归下来，所以其实是有误差的
-	make_inner_product_table(D, width);
+	START_T("计算散度");
+	set_functions(width);
+	set_inner_product_table(width);
 	//divergence df;
 	for (int d = 0;d <= D;d++) {
 		for (int i = 0;i < size_d[d];i++) {
@@ -1827,31 +1707,21 @@ int main() {
 					for (int idx = start_idx;idx <= end_idx;idx++) {
 						node& o2 = *nodes_d[D][idx];
 						normal u;
-						u.x = table2[D][d][o2.key.extract(0).value * (1 << d) + o.key.extract(0).value] * table1[D][d][o2.key.extract(1).value * (1 << d) + o.key.extract(1).value] * table1[D][d][o2.key.extract(2).value * (1 << d) + o.key.extract(2).value];
-						u.y = table2[D][d][o2.key.extract(1).value * (1 << d) + o.key.extract(1).value] * table1[D][d][o2.key.extract(0).value * (1 << d) + o.key.extract(0).value] * table1[D][d][o2.key.extract(2).value * (1 << d) + o.key.extract(2).value];
-						u.z = table2[D][d][o2.key.extract(2).value * (1 << d) + o.key.extract(2).value] * table1[D][d][o2.key.extract(0).value * (1 << d) + o.key.extract(0).value] * table1[D][d][o2.key.extract(1).value * (1 << d) + o.key.extract(1).value];
+						u.x = table2[D][d][offset[o2.idx_node][0].value * (1 << d) + offset[o.idx_node][0].value] * table1[D][d][offset[o2.idx_node][1].value * (1 << d) + offset[o.idx_node][1].value] * table1[D][d][offset[o2.idx_node][2].value * (1 << d) + offset[o.idx_node][2].value];
+						u.y = table2[D][d][offset[o2.idx_node][1].value * (1 << d) + offset[o.idx_node][1].value] * table1[D][d][offset[o2.idx_node][0].value * (1 << d) + offset[o.idx_node][0].value] * table1[D][d][offset[o2.idx_node][2].value * (1 << d) + offset[o.idx_node][2].value];
+						u.z = table2[D][d][offset[o2.idx_node][2].value * (1 << d) + offset[o.idx_node][2].value] * table1[D][d][offset[o2.idx_node][0].value * (1 << d) + offset[o.idx_node][0].value] * table1[D][d][offset[o2.idx_node][1].value * (1 << d) + offset[o.idx_node][1].value];
 						u *= -1;
 						o.b += o2.v * u;
 					}
 				}
 			}
-			// 暴力做法
-			/*for (int i2 = 0;i2 < size_d[D];i2++) {
-				node& o2 = *nodes_d[D][i2];
-				double distance = sqrt(pow(o2.center.x - o.center.x, 2) + pow(o2.center.y - o.center.y, 2) + pow(o2.center.z - o.center.z, 2));
-				if (distance >= o.width + o2.width) continue;
-				normal u;
-				u.x = table2[D][d][o2.key.extract(0).value * (1 << d) + o.key.extract(0).value] * table1[D][d][o2.key.extract(1).value * (1 << d) + o.key.extract(1).value] * table1[D][d][o2.key.extract(2).value * (1 << d) + o.key.extract(2).value];
-				u.y = table2[D][d][o2.key.extract(1).value * (1 << d) + o.key.extract(1).value] * table1[D][d][o2.key.extract(0).value * (1 << d) + o.key.extract(0).value] * table1[D][d][o2.key.extract(2).value * (1 << d) + o.key.extract(2).value];
-				u.z = table2[D][d][o2.key.extract(2).value * (1 << d) + o.key.extract(2).value] * table1[D][d][o2.key.extract(0).value * (1 << d) + o.key.extract(0).value] * table1[D][d][o2.key.extract(1).value * (1 << d) + o.key.extract(1).value];
-				u = (-1) * u;
-				o.b += o2.v * u;
-			}*/
 		}
 	}
-	std::cout << "第四步：散度计算完毕" << std::endl;
+	END_T();
 
+	
 	// 第五步：求解泊松方程
+	START_T("求解泊松方程");
 	solution = new double[tot_size]();
 	for (int d = 1;d <= D;d++) pre_size[d] = pre_size[d - 1] + size_d[d - 1];
 
@@ -1876,52 +1746,33 @@ int main() {
 			solution[i + pre_size[d]] = x[d][i];
 		}
 	}
-	/*Eigen::SparseMatrix<double> L(tot_size, tot_size);
-	std::vector<Eigen::Triplet<double>> tripletList;
-	for (int d = 0;d <= D;d++) {
-		for (int i = 0;i < size_d[d];i++) {
-			node& o = *nodes_d[d][i];
-			int idx = o.idx_node;
-			for (int d2 = 0;d2 <= d;d2++) {
-				node* pa = &o;
-				for (int j = 0;j < d - d2;j++) pa = pa->parent;
-				for (int j = 0;j < 27;j++) {
-					if (pa->neighbors[j] != nullptr) {
-						node& o2 = *pa->neighbors[j];
-						int idx2 = o2.idx_node;
-						double value = 0;
-						value += table3[d][d2][o.key.extract(0).value * (1 << d2) + o2.key.extract(0).value] * table1[d][d2][o.key.extract(1).value * (1 << d2) + o2.key.extract(1).value] * table1[d][d2][o.key.extract(2).value * (1 << d2) + o2.key.extract(2).value];
-						value += table3[d][d2][o.key.extract(1).value * (1 << d2) + o2.key.extract(1).value] * table1[d][d2][o.key.extract(0).value * (1 << d2) + o2.key.extract(0).value] * table1[d][d2][o.key.extract(2).value * (1 << d2) + o2.key.extract(2).value];
-						value += table3[d][d2][o.key.extract(2).value * (1 << d2) + o2.key.extract(2).value] * table1[d][d2][o.key.extract(1).value * (1 << d2) + o2.key.extract(1).value] * table1[d][d2][o.key.extract(0).value * (1 << d2) + o2.key.extract(0).value];
-						value = -value;
-						if (value != 0) {
-							tripletList.emplace_back(idx, idx2, value);
-							if (idx != idx2) {
-								tripletList.emplace_back(idx2, idx, -value);
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-	L.setFromTriplets(tripletList.begin(), tripletList.end());
-	Eigen::VectorXd b(tot_size);
-	for (int d = 0;d <= D;d++) {
-		for (int i = 0;i < size_d[d];i++) {
-			node& o = *nodes_d[d][i];
-			b[o.idx_node] = o.b;
-		}
-	}
-	Eigen::VectorXd x = solve_conjugate_gradient(L, b, int(std::pow(L.rows(), 0.7)));
-	for (int i = 0;i < tot_size;i++) {
-		solution[i] = x[i];
-	}*/
+	END_T();
 
-	std::cout << "第五步：泊松方程求解完毕" << std::endl;
+	// 第六步：计算等值面的值
+	START_T("计算等值面的值");
+	set_value_table();
+	double sum = 0;
+	double val = 0;
+	for (int i = 0;i < size_d[D];i++) {
+		node& o = *nodes_d[D][i];
+		double w = sqrt(o.v * o.v);
+		val += w * evaluate_node_center(root, &o);
+		//val += w * evaluate_point(root, o.center);
+		sum += w;
+	}
+	iso_value = val / sum;
+	END_T();
+	std::cout << "等值面的值为：" << iso_value << std::endl;
 
-	// 第六步：提取等值面
+	// 第七步：节点细分
+	START_T("节点细分");
+	subdivide();
+	END_T();
+
+	
+	// 第八步：提取等值面
+	START_T("提取等值面");
 	marching_cube();
-	std::cout << "第六步：等值面提取完毕" << std::endl;
+	END_T();
 	return 0;
 }

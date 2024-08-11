@@ -801,6 +801,7 @@ struct point_comparator {
 	}
 };
 std::map<point, double, point_comparator> value_at_point;
+std::unordered_map<unsigned int, double> value_at_index;
 std::map<point, int, point_comparator> triangle_vertices_idx;
 point* triangle_vertices;
 int marching_cube_table[256][15] = {
@@ -1112,8 +1113,9 @@ double evaluate_point(node* cur, point p) {
 }
 double evaluate_point(node* cur, point p, unsigned int index_x, unsigned int index_y, unsigned int index_z) {
 	static int num = (1 << (D + 1)) + 1;
-	if (value_at_point.find(p) != value_at_point.end()) {
-		return value_at_point[p];
+	unsigned int index = (index_x << 2 * (D + 2)) + (index_y << (D + 2)) + index_z;
+	if (value_at_index.find(index) != value_at_index.end()) {
+		return value_at_index[index];
 	}
 	std::stack<node*> s;
 	s.push(cur);
@@ -1132,25 +1134,34 @@ double evaluate_point(node* cur, point p, unsigned int index_x, unsigned int ind
 			}
 		}
 	}
-	value_at_point[p] = value;
+	value_at_index[index] = value;
 	return value;
 }
 double iso_value = 0;
-std::set<point, point_comparator> vis;
+std::unordered_set<unsigned int> vis;
+std::unordered_map<unsigned int, bool> vis_e[3];
+unsigned int get_index(const point& p) {
+	unsigned int index_x, index_y, index_z, index;
+	index_x = round((p.x + 0.5) * (1 << (D + 1)));
+	index_y = round((p.y + 0.5) * (1 << (D + 1)));
+	index_z = round((p.z + 0.5) * (1 << (D + 1)));
+	index = (index_x << 2 * (D + 2)) + (index_y << (D + 2)) + index_z;
+	return index;
+}
 void subdivide() {
 	int edges[12][2] = { {0,1},{1,2},{2,3},{3,0},{4,5},{5,6},{6,7},{7,4},{0,4},{1,5},{2,6},{3,7} };
 	double width = 1.0 / (1 << D);
 	std::stack<point> s;
-	for (int i = 0;i < size_d[D];i++) {
-		node& o = *nodes_d[D][i];
-		s.push(o.center);
-		vis.insert(o.center);
-	}
 	point node_center, new_node_center;
-	unsigned int index_x, index_y, index_z;
+	unsigned int index_x, index_y, index_z, index;
 	double v1, v2;
 	int idx1, idx2;
 	point center;
+	for (int i = 0;i < size_d[D];i++) {
+		node& o = *nodes_d[D][i];
+		s.push(o.center);
+		vis.insert(get_index(o.center));
+	}
 	while (!s.empty()) {
 		node_center = s.top();
 		s.pop();
@@ -1173,6 +1184,11 @@ void subdivide() {
 			if (e == 8 || e == 9 || e == 10 || e == 11) dir = 0; // x轴方向
 			if (e == 0 || e == 2 || e == 4 || e == 6) dir = 1; // y轴方向
 			if (e == 1 || e == 3 || e == 5 || e == 7) dir = 2; // z轴方向
+			index = get_index(center);
+			if (vis_e[dir].find(index) != vis_e[dir].end()) {
+				if (vis_e[dir][index]) has_root = true;
+				continue;
+			}
 			index_x = round((p[idx1].x + 0.5) * (1 << (D + 1)));
 			index_y = round((p[idx1].y + 0.5) * (1 << (D + 1)));
 			index_z = round((p[idx1].z + 0.5) * (1 << (D + 1)));
@@ -1183,41 +1199,52 @@ void subdivide() {
 			v2 = evaluate_point(root, p[idx2], index_x, index_y, index_z) - iso_value;
 			if (v1 < 0 && v2 > 0 || v1 > 0 && v2 < 0) {
 				has_root = true;
+				vis_e[dir][index] = true;
 				// 枚举边的3个虚拟邻居
 				new_node_center = 2 * (center - node_center) + node_center;
-				if (vis.find(new_node_center) == vis.end()) {
-					s.push(new_node_center); vis.insert(new_node_center);
+				index = get_index(new_node_center);
+				if (vis.find(index) == vis.end()) {
+					s.push(new_node_center); vis.insert(index);
 				}
 				if (dir == 0) {
 					new_node_center = { node_center.x, node_center.y, 2 * (center.z - node_center.z) + node_center.z };
-					if (vis.find(new_node_center) == vis.end()) {
-						s.push(new_node_center); vis.insert(new_node_center);
+					index = get_index(new_node_center);
+					if (vis.find(index) == vis.end()) {
+						s.push(new_node_center); vis.insert(index);
 					}
 					new_node_center = { node_center.x, 2 * (center.y - node_center.y) + node_center.y, node_center.z };
-					if (vis.find(new_node_center) == vis.end()) {
-						s.push(new_node_center); vis.insert(new_node_center);
+					index = get_index(new_node_center);
+					if (vis.find(index) == vis.end()) {
+						s.push(new_node_center); vis.insert(index);
 					}
 				}
 				else if (dir == 1) {
 					new_node_center = { node_center.x, node_center.y, 2 * (center.z - node_center.z) + node_center.z };
-					if (vis.find(new_node_center) == vis.end()) {
-						s.push(new_node_center); vis.insert(new_node_center);
+					index = get_index(new_node_center);
+					if (vis.find(index) == vis.end()) {
+						s.push(new_node_center); vis.insert(index);
 					}
 					new_node_center = { 2 * (center.x - node_center.x) + node_center.x, node_center.y, node_center.z };
-					if (vis.find(new_node_center) == vis.end()) {
-						s.push(new_node_center); vis.insert(new_node_center);
+					index = get_index(new_node_center);
+					if (vis.find(index) == vis.end()) {
+						s.push(new_node_center); vis.insert(index);
 					}
 				}
 				else if (dir == 2) {
 					new_node_center = { node_center.x, 2 * (center.y - node_center.y) + node_center.y, node_center.z };
-					if (vis.find(new_node_center) == vis.end()) {
-						s.push(new_node_center); vis.insert(new_node_center);
+					index = get_index(new_node_center);
+					if (vis.find(index) == vis.end()) {
+						s.push(new_node_center); vis.insert(index);
 					}
 					new_node_center = { 2 * (center.x - node_center.x) + node_center.x, node_center.y, node_center.z };
-					if (vis.find(new_node_center) == vis.end()) {
-						s.push(new_node_center); vis.insert(new_node_center);
+					index = get_index(new_node_center);
+					if (vis.find(index) == vis.end()) {
+						s.push(new_node_center); vis.insert(index);
 					}
 				}
+			}
+			else {
+				vis_e[dir][index] = false;
 			}
 		}
 		if (has_root) {
@@ -1774,5 +1801,7 @@ int main() {
 	START_T("提取等值面");
 	marching_cube();
 	END_T();
+
+	std::cout << "曲面生成完毕，运行visualizaiton.py查看" << std::endl;
 	return 0;
 }

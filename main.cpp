@@ -270,7 +270,7 @@ double integral(const function& f) {
 }
 
 function differential(const function& f) {
-	// 我们构造的F的分段点处不一定可导（按论文2的设置，只与自身卷了一次），但没关系，我们求导是为了做内积，有限点处不可导不影响积分结果
+	// 我们构造的F的分段点处不一定可导，但没关系，我们求导是为了做内积，有限点处不可导不影响积分结果
 	function res(f.num, std::max(0, f.degree - 1));
 	for (int i = 0;i <= res.num;i++) {
 		res.break_points[i] = f.break_points[i];
@@ -1157,6 +1157,9 @@ void subdivide() {
 	double v1, v2;
 	int idx1, idx2;
 	point center;
+	point p[8];
+	double v[8];
+	bool flag[8];
 	for (int i = 0;i < size_d[D];i++) {
 		node& o = *nodes_d[D][i];
 		s.push(o.center);
@@ -1165,7 +1168,6 @@ void subdivide() {
 	while (!s.empty()) {
 		node_center = s.top();
 		s.pop();
-		point p[8];
 		// 注意MC算法中顶点编号与八叉树算法中顶点编号不同，这里的编号参考https://github.com/Goodhao/marching-cube/blob/main/encode.png
 		p[0] = node_center + point{-width / 2, -width / 2, +width / 2};
 		p[1] = node_center + point{-width / 2, +width / 2, +width / 2};
@@ -1175,6 +1177,7 @@ void subdivide() {
 		p[5] = node_center + point{+width / 2, +width / 2, +width / 2};
 		p[6] = node_center + point{+width / 2, +width / 2, -width / 2};
 		p[7] = node_center + point{+width / 2, -width / 2, -width / 2};
+		memset(flag, 0, sizeof(flag));
 		bool has_root = false;
 		for (int e = 0;e < 12;e++) {
 			idx1 = edges[e][0];
@@ -1192,11 +1195,23 @@ void subdivide() {
 			index_x = round((p[idx1].x + 0.5) * (1 << (D + 1)));
 			index_y = round((p[idx1].y + 0.5) * (1 << (D + 1)));
 			index_z = round((p[idx1].z + 0.5) * (1 << (D + 1)));
-			v1 = evaluate_point(root, p[idx1], index_x, index_y, index_z) - iso_value;
+			if (!flag[idx1]) {
+				v1 = v[idx1] = evaluate_point(root, p[idx1], index_x, index_y, index_z) - iso_value;
+				flag[idx1] = true;
+			}
+			else {
+				v1 = v[idx1];
+			}
 			index_x = round((p[idx2].x + 0.5) * (1 << (D + 1)));
 			index_y = round((p[idx2].y + 0.5) * (1 << (D + 1)));
 			index_z = round((p[idx2].z + 0.5) * (1 << (D + 1)));
-			v2 = evaluate_point(root, p[idx2], index_x, index_y, index_z) - iso_value;
+			if (!flag[idx2]) {
+				v2 = v[idx2] = evaluate_point(root, p[idx2], index_x, index_y, index_z) - iso_value;
+				flag[idx2] = true;
+			}
+			else {
+				v2 = v[idx2];
+			}
 			if (v1 < 0 && v2 > 0 || v1 > 0 && v2 < 0) {
 				has_root = true;
 				vis_e[dir][index] = true;

@@ -577,7 +577,35 @@ struct node {
 	}
 	void compute_neighbors_by_LUT() {
 		// 要求已知parent的neighbors
-
+		static int LUTparent[8][27] = {
+			{0,1,1,3,4,4,3,4,4,9,10,10,12,13,13,12,13,13,9,10,10,12,13,13,12,13,13},
+			{1,1,2,4,4,5,4,4,5,10,10,11,13,13,14,13,13,14,10,10,11,13,13,14,13,13,14},
+			{3,4,4,3,4,4,6,7,7,12,13,13,12,13,13,15,16,16,12,13,13,12,13,13,15,16,16},
+			{4,4,5,4,4,5,7,7,8,13,13,14,13,13,14,16,16,17,13,13,14,13,13,14,16,16,17},
+			{9,10,10,12,13,13,12,13,13,9,10,10,12,13,13,12,13,13,18,19,19,21,22,22,21,22,22},
+			{10,10,11,13,13,14,13,13,14,10,10,11,13,13,14,13,13,14,19,19,20,22,22,23,22,22,23},
+			{12,13,13,12,13,13,15,16,16,12,13,13,12,13,13,15,16,16,21,22,22,21,22,22,24,25,25},
+			{13,13,14,13,13,14,16,16,17,13,13,14,13,13,14,16,16,17,22,22,23,22,22,23,25,25,26}
+		};
+		static int LUTchild[8][27] = {
+			{7,6,7,5,4,5,7,6,7,3,2,3,1,0,1,3,2,3,7,6,7,5,4,5,7,6,7},
+			{6,7,6,4,5,4,6,7,6,2,3,2,0,1,0,2,3,2,6,7,6,4,5,4,6,7,6},
+			{5,4,5,7,6,7,5,4,5,1,0,1,3,2,3,1,0,1,5,4,5,7,6,7,5,4,5},
+			{4,5,4,6,7,6,4,5,4,0,1,0,2,3,2,0,1,0,4,5,4,6,7,6,4,5,4},
+			{3,2,3,1,0,1,3,2,3,7,6,7,5,4,5,7,6,7,3,2,3,1,0,1,3,2,3},
+			{2,3,2,0,1,0,2,3,2,6,7,6,4,5,4,6,7,6,2,3,2,0,1,0,2,3,2},
+			{1,0,1,3,2,3,1,0,1,5,4,5,7,6,7,5,4,5,1,0,1,3,2,3,1,0,1},
+			{0,1,0,2,3,2,0,1,0,4,5,4,6,7,6,4,5,4,0,1,0,2,3,2,0,1,0}
+		};
+		neighbors[13] = this;
+		if (parent == nullptr) return;
+		int idx_as_child = key.get_branch_key();
+		for (int i = 0;i < 27;i++) {
+			node* parent_neighbor = parent->neighbors[LUTparent[idx_as_child][i]];
+			if (parent_neighbor != nullptr) {
+				neighbors[i] = parent_neighbor->children[LUTchild[idx_as_child][i]];
+			}
+		}
 	}
 	void process(node* cur, operation* op) {
 		// 遍历基函数与当前节点基函数有重合的所有节点，并执行相应操作
@@ -616,7 +644,7 @@ void set_functions(double width) {
 		void* p = operator new[]((1 << d) * sizeof(function));
 		key_to_Fo[d] = static_cast<function*>(p);
 		for (int i = 0;i < (1 << d);i++) {
-			new(&key_to_Fo[d][i]) function(3, 2);
+			new (&key_to_Fo[d][i]) function(3, 2);
 		}
 		for (unsigned int key = 0;key < (1 << d);key++) {
 			x_bits xbits;
@@ -1292,6 +1320,7 @@ void subdivide() {
 }
 void marching_cube() {
 	std::vector<triangle> triangles;
+	int cc = 0;
 	for (int d = D;d <= D;d++) {
 		for (int i = 0;i < size_d[d];i++) {
 			node& o = *nodes_d[d][i];
@@ -1533,7 +1562,6 @@ int main() {
 				o.key.init(key + j, D);
 				o.compute_center();
 			}
-			o.cnt_o = 1;
 		}
 	}
 	for (int i = D;i >= 1;i--) {
@@ -1600,7 +1628,8 @@ int main() {
 		for (int i = 0;i < size_d[d];i++) {
 			node& o = *nodes_d[d][i];
 			o.idx_node = tot_size++;
-			o.naive_compute_neighbors();
+			o.compute_neighbors_by_LUT();
+			//o.naive_compute_neighbors();
 		}
 	}
 	for (int d = D;d >= 0;d--) {
@@ -1730,7 +1759,6 @@ int main() {
 		}
 	}
 	END_T();
-
 	
 	// 第四步：计算向量场的散度
 	// 需要注意的是这里按论文2的做法，相当于把基函数支撑集截断到[-1,1]，严格按[-1.5,1.5]来做需要枚举邻居的邻居或者从树根一路递归下来，所以其实是有误差的
@@ -1761,7 +1789,6 @@ int main() {
 	}
 	END_T();
 
-	
 	// 第五步：求解泊松方程
 	START_T("求解泊松方程");
 	solution = new double[tot_size]();

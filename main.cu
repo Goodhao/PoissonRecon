@@ -508,9 +508,38 @@ struct node {
 			}
 		}
 	}
-	void compute_neighbors_by_LUT() {
+	__device__ void compute_neighbors_by_LUT() {
 		// 要求已知parent的neighbors
-
+		static __device__ int LUTparent[8][27] = {
+			{0,1,1,3,4,4,3,4,4,9,10,10,12,13,13,12,13,13,9,10,10,12,13,13,12,13,13},
+			{1,1,2,4,4,5,4,4,5,10,10,11,13,13,14,13,13,14,10,10,11,13,13,14,13,13,14},
+			{3,4,4,3,4,4,6,7,7,12,13,13,12,13,13,15,16,16,12,13,13,12,13,13,15,16,16},
+			{4,4,5,4,4,5,7,7,8,13,13,14,13,13,14,16,16,17,13,13,14,13,13,14,16,16,17},
+			{9,10,10,12,13,13,12,13,13,9,10,10,12,13,13,12,13,13,18,19,19,21,22,22,21,22,22},
+			{10,10,11,13,13,14,13,13,14,10,10,11,13,13,14,13,13,14,19,19,20,22,22,23,22,22,23},
+			{12,13,13,12,13,13,15,16,16,12,13,13,12,13,13,15,16,16,21,22,22,21,22,22,24,25,25},
+			{13,13,14,13,13,14,16,16,17,13,13,14,13,13,14,16,16,17,22,22,23,22,22,23,25,25,26}
+		};
+		static __device__ int LUTchild[8][27] = {
+			{7,6,7,5,4,5,7,6,7,3,2,3,1,0,1,3,2,3,7,6,7,5,4,5,7,6,7},
+			{6,7,6,4,5,4,6,7,6,2,3,2,0,1,0,2,3,2,6,7,6,4,5,4,6,7,6},
+			{5,4,5,7,6,7,5,4,5,1,0,1,3,2,3,1,0,1,5,4,5,7,6,7,5,4,5},
+			{4,5,4,6,7,6,4,5,4,0,1,0,2,3,2,0,1,0,4,5,4,6,7,6,4,5,4},
+			{3,2,3,1,0,1,3,2,3,7,6,7,5,4,5,7,6,7,3,2,3,1,0,1,3,2,3},
+			{2,3,2,0,1,0,2,3,2,6,7,6,4,5,4,6,7,6,2,3,2,0,1,0,2,3,2},
+			{1,0,1,3,2,3,1,0,1,5,4,5,7,6,7,5,4,5,1,0,1,3,2,3,1,0,1},
+			{0,1,0,2,3,2,0,1,0,4,5,4,6,7,6,4,5,4,0,1,0,2,3,2,0,1,0}
+		};
+		neighbors[13] = this;
+		if (parent == nullptr) return;
+		int idx_as_child = key.get_branch_key();
+		int i;
+		for (i = 0; i < 27; i++) {
+			node* parent_neighbor = parent->neighbors[LUTparent[idx_as_child][i]];
+			if (parent_neighbor != nullptr) {
+				neighbors[i] = parent_neighbor->children[LUTchild[idx_as_child][i]];
+			}
+		}
 	}
 	void process(node* cur, operation* op) {
 		// 遍历基函数与当前节点基函数有重合的所有节点，并执行相应操作
@@ -625,7 +654,8 @@ __global__ void set_idxs_and_neighbors(node** vec_ptr, int pre, int size) {
 	int i = blockIdx.x * blockDim.x + threadIdx.x;
 	if (i < size) {
 		vec_ptr[i]->idx_node = pre + i;
-		vec_ptr[i]->naive_compute_neighbors();
+		vec_ptr[i]->compute_neighbors_by_LUT();
+		//vec_ptr[i]->naive_compute_neighbors();
 	}
 }
 __global__ void set_descendants(node** vec_ptr, int d, int D, int size) {
@@ -834,7 +864,7 @@ __device__ double evaluate_point(int D, node* cur, point p, unsigned int index_x
 	int num = (1 << (D + 1)) + 1;
 	unsigned int index = (index_x << 2 * (D + 2)) + (index_y << (D + 2)) + index_z;
 	int h = -1;
-	node* s[10 * 27];
+	node* s[8 * 10];
 	s[++h] = cur;
 	double weight;
 	double value = 0;
@@ -846,7 +876,8 @@ __device__ double evaluate_point(int D, node* cur, point p, unsigned int index_x
 		if (cur->has_children) {
 			for (i = 0; i < 8; i++) {
 				node& o = *cur->children[i];
-				if (o.idx_node != -1 && fabs(p.x - o.center.x) < 1.5 * o.width && fabs(p.y - o.center.y) < 1.5 * o.width && fabs(p.z - o.center.z) < 1.5 * o.width) {
+				//if (o.idx_node != -1 && fabs(p.x - o.center.x) < 1.5 * o.width && fabs(p.y - o.center.y) < 1.5 * o.width && fabs(p.z - o.center.z) < 1.5 * o.width) {
+				if (o.idx_node != -1 && fabs(p.x - o.center.x) < o.width && fabs(p.y - o.center.y) < o.width && fabs(p.z - o.center.z) < o.width) {
 					s[++h] = &o;
 				}
 			}
@@ -888,119 +919,6 @@ __global__ void put(node** vec_ptr, point* arr, int* vis, double width, int D, i
 		vis[get_index(o.center, width, D)] = 1;
 	}
 }
-//__global__ void extend(int D, point* arr1, point* arr2, int* d_sz1, int* d_sz2, int* vis, double width, node* root, double* table4[], x_bits* offset[], float* solution, double iso_value) {
-//	static __device__ int edges[12][2] = { {0,1},{1,2},{2,3},{3,0},{4,5},{5,6},{6,7},{7,4},{0,4},{1,5},{2,6},{3,7} };
-//	int size = *d_sz1;
-//	int i = blockIdx.x * blockDim.x + threadIdx.x;
-//	if (i < size) {
-//		point& node_center = arr1[i];
-//		point new_node_center;
-//		unsigned int index_x, index_y, index_z, index;
-//		double v1, v2;
-//		int idx1, idx2;
-//		point center;
-//		point p[8];
-//		double v[8];
-//		bool flag[8] = { false };
-//		// 注意MC算法中顶点编号与八叉树算法中顶点编号不同，这里的编号参考https://github.com/Goodhao/marching-cube/blob/main/encode.png
-//		p[0] = node_center + point{ -width / 2, -width / 2, +width / 2 };
-//		p[1] = node_center + point{ -width / 2, +width / 2, +width / 2 };
-//		p[2] = node_center + point{ -width / 2, +width / 2, -width / 2 };
-//		p[3] = node_center + point{ -width / 2, -width / 2, -width / 2 };
-//		p[4] = node_center + point{ +width / 2, -width / 2, +width / 2 };
-//		p[5] = node_center + point{ +width / 2, +width / 2, +width / 2 };
-//		p[6] = node_center + point{ +width / 2, +width / 2, -width / 2 };
-//		p[7] = node_center + point{ +width / 2, -width / 2, -width / 2 };
-//		int dir;
-//		int idx;
-//		bool has_root = false;
-//		int old;
-//		for (int e = 0; e < 12; e++) {
-//			idx1 = edges[e][0];
-//			idx2 = edges[e][1];
-//			center = (p[idx1] + p[idx2]) / 2;
-//			dir = 0;
-//			if (e == 8 || e == 9 || e == 10 || e == 11) dir = 0; // x轴方向
-//			if (e == 0 || e == 2 || e == 4 || e == 6) dir = 1; // y轴方向
-//			if (e == 1 || e == 3 || e == 5 || e == 7) dir = 2; // z轴方向
-//			index_x = round((p[idx1].x + 0.5) * (1 << (D + 1)));
-//			index_y = round((p[idx1].y + 0.5) * (1 << (D + 1)));
-//			index_z = round((p[idx1].z + 0.5) * (1 << (D + 1)));
-//			if (!flag[idx1]) {
-//				v1 = v[idx1] = evaluate_point(D, root, p[idx1], index_x, index_y, index_z, table4, offset, solution) - iso_value;
-//				flag[idx1] = true;
-//			}
-//			else {
-//				v1 = v[idx1];
-//			}
-//			index_x = round((p[idx2].x + 0.5) * (1 << (D + 1)));
-//			index_y = round((p[idx2].y + 0.5) * (1 << (D + 1)));
-//			index_z = round((p[idx2].z + 0.5) * (1 << (D + 1)));
-//			if (!flag[idx2]) {
-//				v2 = v[idx2] = evaluate_point(D, root, p[idx2], index_x, index_y, index_z, table4, offset, solution) - iso_value;
-//				flag[idx2] = true;
-//			}
-//			else {
-//				v2 = v[idx2];
-//			}
-//			if (v1 < 0 && v2 > 0 || v1 > 0 && v2 < 0) {
-//				has_root = true;
-//				// 枚举边的3个虚拟邻居
-//				new_node_center = 2 * (center - node_center) + node_center;
-//				index = get_index(new_node_center, width, D);
-//				old = atomicCAS(&vis[index], 0, 1);
-//				if (old == 0) {
-//					idx = atomicAdd(d_sz2, 1); arr2[idx] = new_node_center; // atomicAdd(d_sz2, 1)返回的是旧值，等效于arr2[h++]=new_node_center
-//				}
-//				if (dir == 0) {
-//					new_node_center = { node_center.x, node_center.y, 2 * (center.z - node_center.z) + node_center.z };
-//					index = get_index(new_node_center, width, D);
-//					old = atomicCAS(&vis[index], 0, 1);
-//					if (old == 0) {
-//						idx = atomicAdd(d_sz2, 1); arr2[idx] = new_node_center;
-//					}
-//					new_node_center = { node_center.x, 2 * (center.y - node_center.y) + node_center.y, node_center.z };
-//					index = get_index(new_node_center, width, D);
-//					old = atomicCAS(&vis[index], 0, 1);
-//					if (old == 0) {
-//						idx = atomicAdd(d_sz2, 1); arr2[idx] = new_node_center;
-//					}
-//				}
-//				else if (dir == 1) {
-//					new_node_center = { node_center.x, node_center.y, 2 * (center.z - node_center.z) + node_center.z };
-//					index = get_index(new_node_center, width, D);
-//					old = atomicCAS(&vis[index], 0, 1);
-//					if (old == 0) {
-//						idx = atomicAdd(d_sz2, 1); arr2[idx] = new_node_center;
-//					}
-//					new_node_center = { 2 * (center.x - node_center.x) + node_center.x, node_center.y, node_center.z };
-//					index = get_index(new_node_center, width, D);
-//					old = atomicCAS(&vis[index], 0, 1);
-//					if (old == 0) {
-//						idx = atomicAdd(d_sz2, 1); arr2[idx] = new_node_center;
-//					}
-//				}
-//				else if (dir == 2) {
-//					new_node_center = { node_center.x, 2 * (center.y - node_center.y) + node_center.y, node_center.z };
-//					index = get_index(new_node_center, width, D);
-//					old = atomicCAS(&vis[index], 0, 1);
-//					if (old == 0) {
-//						idx = atomicAdd(d_sz2, 1); arr2[idx] = new_node_center;
-//					}
-//					new_node_center = { 2 * (center.x - node_center.x) + node_center.x, node_center.y, node_center.z };
-//					index = get_index(new_node_center, width, D);
-//					old = atomicCAS(&vis[index], 0, 1);
-//					if (old == 0) {
-//						idx = atomicAdd(d_sz2, 1); arr2[idx] = new_node_center;
-//					}
-//				}
-//			}
-//		}
-//		if (has_root) {
-//			// push node_center
-//		}
-//	}
-//}
 __global__ void evaluate_vertices(int D, point* arr, double* vals, int* d_sz, double width, node* root, double* table4[], x_bits* offset[], float* solution, double iso_value) {
 	static __device__ point pp[8] = {
 		point{ -0.5, -0.5, +0.5 },
@@ -1621,7 +1539,8 @@ int main() {
 
 	// 第一步：生成八叉树
 	std::ifstream point_cloud;
-	point_cloud.open("horse.txt");
+	point_cloud.open("armadillo点云.txt");
+	//point_cloud.open("horse.txt");
 	//point_cloud.open("sphere_points_and_normals.txt");
 	//point_cloud.open("cube.txt");
 	//point_cloud.open("plane_points_and_normals.txt");
@@ -2041,20 +1960,22 @@ int main() {
 	END_T();
 
 	START_T("为节点细分分配内存");
+	int M = 256 * 256 * 256; // 可能被用到的节点索引的最大值，需要取上界256^3，其实不会全用到，但因为可能索引很大的节点被用到，所以还是得取满上界。除非可以用hash表优化？
+	int M2 = 256 * 256 * 256; // 实际搜索到的节点数量的估计值，上界也是256^3，但它用作连续段的长度，不需要取满上界，可以乘估计系数0.01
 	width = 1.0 / (1 << D);
 	int* vis;
 	int* has_root;
-	cudaMalloc(&vis, 256 * 256 * 256 * sizeof(int));
-	cudaMalloc(&has_root, 256 * 256 * 256 * sizeof(int));
+	cudaMalloc(&vis, M * sizeof(int));
+	cudaMalloc(&has_root, M * sizeof(int));
 	point* arr[2]; // 滚动数组，并行处理一个数组内的一批元素，同时把生成的一批元素放入另一个数组
 	point* res;
-	cudaMalloc(&arr[0], 256 * 256 * 256 * sizeof(point));
-	cudaMalloc(&arr[1], 256 * 256 * 256 * sizeof(point));
-	cudaMalloc(&res, 256 * 256 * 256 * sizeof(point));
+	cudaMalloc(&arr[0], M2 * sizeof(point));
+	cudaMalloc(&arr[1], M2 * sizeof(point));
+	cudaMalloc(&res, M2 * sizeof(point));
 	double* vals;
 	double* res_vals;
-	cudaMalloc(&vals, 8 * 256 * 256 * 256 * sizeof(double));
-	cudaMalloc(&res_vals, 8 * 256 * 256 * 256 * sizeof(double));
+	cudaMalloc(&vals, 8 * M * sizeof(double));
+	cudaMalloc(&res_vals, 8 * M2 * sizeof(double));
 	int* d_sz[2];
 	int* d_res_sz;
 	cudaMalloc(&d_sz[0], sizeof(int));
@@ -2088,8 +2009,8 @@ int main() {
 		cudaDeviceSynchronize();
 		turn ^= 1;
 	}
-	/*cudaMemcpy(&cur_sz, d_res_sz, sizeof(int), cudaMemcpyDeviceToHost);
-	std::cout << cur_sz << std::endl;*/
+	cudaMemcpy(&cur_sz, d_res_sz, sizeof(int), cudaMemcpyDeviceToHost);
+	std::cout << cur_sz << std::endl;
 	END_T();
 	START_T("提取等值面");
 	int* d_triangles_sz;
@@ -2097,15 +2018,17 @@ int main() {
 	cudaMemset(d_triangles_sz, 0, sizeof(int));
 	triangle* d_triangles;
 	triangle* h_triangles;
-	cudaMalloc(&d_triangles, 5 * 256 * 256 * 256 * sizeof(triangle));
-	h_triangles = (triangle*)malloc(5 * 256 * 256 * 256 * sizeof(triangle));
+	cudaMalloc(&d_triangles, 5 * cur_sz * sizeof(triangle));
+	h_triangles = (triangle*)malloc(5 * cur_sz * sizeof(triangle));
 	marching_cube << <numBlocks, threadsPerBlock >> > (width, res, res_vals, d_res_sz, d_triangles, d_triangles_sz);
 	cudaDeviceSynchronize();
+	cudaMemcpy(h_triangles, d_triangles, 5 * cur_sz * sizeof(triangle), cudaMemcpyDeviceToHost);
 	cudaMemcpy(&cur_sz, d_triangles_sz, sizeof(int), cudaMemcpyDeviceToHost);
-	//std::cout << cur_sz << std::endl;
-	cudaMemcpy(h_triangles, d_triangles, 5 * 256 * 256 * 256 * sizeof(triangle), cudaMemcpyDeviceToHost);
+	std::cout << cur_sz << std::endl;
 	END_T();
 
+	// 为了方便，内存里保存的是一个个含有实际坐标点的三角形，而并没有按OBJ那种格式来保存唯一的顶点数组，然后保存三个顶点的索引
+	// 因此保存为OBJ文件的过程很慢，这一点可以从一开始就更改内存中的保存形式来优化
 	std::ofstream file;
 	file.open("triangles.obj");
 	struct point_comparator {
